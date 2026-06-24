@@ -1,0 +1,28 @@
+services:
+  ocr:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Override any OCR_* setting here. Examples:
+      OCR_CONFIDENCE_THRESHOLD: "0.80"
+      OCR_PADDLE_PRIMARY_LANG: "fr"
+      OCR_USE_GPU: "false"
+      OCR_LOG_LEVEL: "INFO"
+      # Set a key to require X-API-Key on /v1 routes; empty disables auth.
+      OCR_API_KEY: ""
+    volumes:
+      # Persist model weights cache (HuggingFace/Paddle) and the result cache.
+      - ./.ocr_cache:/srv/.ocr_cache
+      - hf_cache:/home/appuser/.cache/huggingface
+      - paddle_cache:/home/appuser/.paddleocr
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  hf_cache:
+  paddle_cache:
