@@ -98,6 +98,9 @@ class Document(BaseModel):
     preprocessing_applied: list[str] = Field(default_factory=list)
     region_count: int = 0
     low_confidence_count: int = 0
+    # Set when the document originates from a PDF page (1-indexed); None for
+    # single-image uploads.
+    page_number: int | None = None
 
 
 class ProcessResponse(BaseModel):
@@ -105,3 +108,20 @@ class ProcessResponse(BaseModel):
     image_hash: str
     excel_filename: str
     document: Document
+
+
+class PageResult(BaseModel):
+    """One processed PDF page: its document plus its own workbook handle."""
+
+    page_number: int
+    excel_filename: str
+    document: Document
+
+
+class PdfProcessResponse(BaseModel):
+    """Result of processing a PDF: one entry per page, each with a workbook."""
+
+    cache_hit: bool
+    pdf_hash: str
+    page_count: int
+    pages: list[PageResult]

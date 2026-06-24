@@ -15,6 +15,10 @@ class InvalidImageError(OCRServiceError):
     """The uploaded bytes could not be decoded as an image (client fault)."""
 
 
+class InvalidPdfError(OCRServiceError):
+    """The uploaded bytes could not be opened as a PDF (client fault)."""
+
+
 class UnsupportedMediaError(OCRServiceError):
     """The upload's content type is not an accepted image type (client fault)."""
 

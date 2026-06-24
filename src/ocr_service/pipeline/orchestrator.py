@@ -7,6 +7,8 @@ region/field degrades gracefully rather than aborting the document.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import cv2
 import numpy as np
 
@@ -17,6 +19,7 @@ from .correction import correct_text
 from .extraction import extract_document
 from .htr_fallback import apply_fallback
 from .ocr_engine import run_ocr
+from .pdf_render import iter_pdf_pages
 from .preprocessing import preprocess
 from .schemas import Document, Region
 
@@ -41,13 +44,16 @@ def _apply_corrections(regions: list[Region]) -> None:
             region.corrected = True
 
 
-def process_image_bytes(
-    data: bytes, settings: Settings | None = None
+def process_image_array(
+    image: np.ndarray, settings: Settings | None = None
 ) -> Document:
-    """Full pipeline on raw image bytes -> structured Document."""
+    """Full pipeline on an already-decoded image array -> Document.
+
+    This is the reusable core: image-file uploads decode to an array first,
+    and each rasterized PDF page is fed here directly.
+    """
     settings = settings or get_settings()
 
-    image = decode_image(data)  # raises InvalidImageError
     processed, applied = preprocess(image, settings)
 
     try:
@@ -73,3 +79,29 @@ def process_image_bytes(
 
     doc.preprocessing_applied = applied
     return doc
+
+
+def process_image_bytes(
+    data: bytes, settings: Settings | None = None
+) -> Document:
+    """Full pipeline on raw image bytes -> structured Document."""
+    settings = settings or get_settings()
+    image = decode_image(data)  # raises InvalidImageError
+    return process_image_array(image, settings)
+
+
+def process_pdf_bytes(
+    data: bytes, settings: Settings | None = None
+) -> Iterator[tuple[int, Document]]:
+    """Process each PDF page independently, yielding (page_number, Document).
+
+    Per the chosen design, each page is a separate document with its own
+    workbook. Pages are rasterized and OCR'd individually and reuse the exact
+    same core pipeline as image uploads. A failure on one page raises and is
+    surfaced by the caller; pages already yielded remain valid.
+    """
+    settings = settings or get_settings()
+    for page_number, image in iter_pdf_pages(data, settings):
+        doc = process_image_array(image, settings)
+        doc.page_number = page_number
+        yield page_number, doc

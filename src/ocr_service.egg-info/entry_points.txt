@@ -1,0 +1,2 @@
+[console_scripts]
+ocr-service = ocr_service.app:app

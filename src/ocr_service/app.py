@@ -21,17 +21,22 @@ from . import __version__
 from .auth import require_api_key
 from .exceptions import (
     InvalidImageError,
+    InvalidPdfError,
     ModelLoadError,
     PayloadTooLargeError,
     PipelineError,
     UnsupportedMediaError,
 )
 from .logging_config import configure_logging, get_logger, request_id_var
-from .pipeline.cache import get_cache, image_hash
+from .pipeline.cache import content_hash, get_cache, image_hash, page_key
 from .pipeline.config import get_settings
 from .pipeline.excel_writer import write_workbook
-from .pipeline.orchestrator import process_image_bytes
-from .pipeline.schemas import ProcessResponse
+from .pipeline.orchestrator import process_image_bytes, process_pdf_bytes
+from .pipeline.schemas import (
+    PageResult,
+    PdfProcessResponse,
+    ProcessResponse,
+)
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -43,6 +48,7 @@ router = APIRouter(prefix="/v1")
 
 _ALLOWED = {"image/jpeg", "image/png", "image/jpg", "image/webp",
             "image/tiff", "image/bmp"}
+_PDF_TYPES = {"application/pdf"}
 
 
 @app.middleware("http")
@@ -71,6 +77,11 @@ async def _too_large(_: Request, exc: PayloadTooLargeError):
 
 @app.exception_handler(InvalidImageError)
 async def _bad_image(_: Request, exc: InvalidImageError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(InvalidPdfError)
+async def _bad_pdf(_: Request, exc: InvalidPdfError):
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
@@ -121,6 +132,62 @@ async def process(file: UploadFile = File(...)) -> ProcessResponse:
 
     return ProcessResponse(cache_hit=False, image_hash=key,
                            excel_filename=excel_name, document=doc)
+
+
+@router.post("/process-pdf", response_model=PdfProcessResponse,
+             dependencies=[Depends(require_api_key)])
+async def process_pdf(file: UploadFile = File(...)) -> PdfProcessResponse:
+    """Process a PDF: each page becomes its own document + workbook.
+
+    The whole-PDF hash gates caching; a re-uploaded identical PDF returns the
+    prior per-page results and reuses the existing workbooks.
+    """
+    if file.content_type not in _PDF_TYPES:
+        raise UnsupportedMediaError(f"Expected a PDF, got: {file.content_type}")
+
+    data = await file.read()
+    if not data:
+        raise InvalidPdfError("Empty upload.")
+    if len(data) > settings.max_upload_mb * 1024 * 1024:
+        raise PayloadTooLargeError("File too large.")
+
+    pdf_hash = content_hash(data)
+
+    # --- Cache check: every page's result + workbook must be present --------
+    cached_pages: list[PageResult] = []
+    page_number = 1
+    all_cached = True
+    while True:
+        key = page_key(pdf_hash, page_number)
+        doc = cache.get(key)
+        if doc is None:
+            all_cached = page_number > 1  # nothing cached at all -> miss
+            break
+        if not cache.has_excel(key):
+            all_cached = False
+            break
+        cached_pages.append(PageResult(page_number=page_number,
+                                       excel_filename=f"{key}.xlsx", document=doc))
+        page_number += 1
+
+    if all_cached and cached_pages:
+        log.info("pdf cache hit", fields={"pdf_hash": pdf_hash,
+                                          "pages": len(cached_pages)})
+        return PdfProcessResponse(cache_hit=True, pdf_hash=pdf_hash,
+                                  page_count=len(cached_pages), pages=cached_pages)
+
+    # --- Full processing, page by page -------------------------------------
+    pages: list[PageResult] = []
+    for num, doc in process_pdf_bytes(data, settings):  # raises domain errors
+        key = page_key(pdf_hash, num)
+        write_workbook(doc, cache.excel_path(key), settings)
+        cache.put(key, doc)
+        pages.append(PageResult(page_number=num,
+                                excel_filename=f"{key}.xlsx", document=doc))
+
+    log.info("pdf processed", fields={"pdf_hash": pdf_hash, "pages": len(pages)})
+    return PdfProcessResponse(cache_hit=False, pdf_hash=pdf_hash,
+                              page_count=len(pages), pages=pages)
 
 
 @router.get("/download/{name}", dependencies=[Depends(require_api_key)])

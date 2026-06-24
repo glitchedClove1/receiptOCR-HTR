@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     max_upload_mb: int = Field(default=25)
     log_level: str = Field(default="INFO")
 
+    # --- PDF handling -------------------------------------------------------
+    # DPI to rasterize each PDF page before OCR. 200-300 is a good range:
+    # higher is sharper but slower and heavier on memory.
+    pdf_render_dpi: int = Field(default=220, ge=72, le=600)
+    # Safety cap on pages processed from one PDF (protects against huge files).
+    pdf_max_pages: int = Field(default=50, ge=1)
+
     # --- Auth (stub) --------------------------------------------------------
     # When set, /process and /download require header `X-API-Key: <value>`.
     # Leave empty to disable (e.g. when auth is handled at the gateway).

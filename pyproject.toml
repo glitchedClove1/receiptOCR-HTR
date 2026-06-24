@@ -29,6 +29,7 @@ ocr = [
     "paddleocr>=2.7",
     "transformers>=4.39",
     "torch>=2.2",
+    "pymupdf>=1.24",
 ]
 dev = [
     "pytest>=8.1",

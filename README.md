@@ -1,10 +1,15 @@
 # Financial OCR Service
 
 OCR pipeline for financial/accounting documents and receipts containing both
-**printed text and handwriting**. PaddleOCR runs first; low-confidence
+**printed text and handwriting**. Accepts **image** uploads (jpg/png/webp/
+tiff/bmp) and **PDF** uploads. PaddleOCR runs first; low-confidence
 **Latin-script** regions are re-recognized with **TrOCR**. Output is structured
 fields plus a per-document Excel workbook. Everything runs **locally** — no
 data leaves the host.
+
+For PDFs, each page is rasterized and processed independently as its own
+document with its own workbook (every page is OCR'd; no embedded-text
+shortcut, for consistent behaviour across digital and scanned PDFs).
 
 > **Scope note:** handwritten Arabic is intentionally **not** handled in this
 > version. Printed Arabic (via PaddleOCR) works; low-confidence Arabic regions
@@ -14,7 +19,9 @@ data leaves the host.
 ## Pipeline
 
 ```
-image bytes
+image bytes ─────────────────────────────┐
+PDF bytes → rasterize each page (PyMuPDF) ─┤  (one page = one document)
+                                           ▼
   → preprocessing (OpenCV: grayscale, CLAHE, denoise, deskew)
   → PaddleOCR (regions + confidence)
   → HTR fallback (TrOCR on low-confidence Latin regions only)
@@ -35,6 +42,7 @@ src/ocr_service/
     config.py             pydantic settings (env-overridable)
     schemas.py            Region / Document / FieldValue / LineItem
     preprocessing.py      OpenCV steps (each toggleable)
+    pdf_render.py         PDF → per-page images (PyMuPDF)
     model_loader.py       thread-safe lazy loaders (Paddle + TrOCR)
     ocr_engine.py         PaddleOCR wrapper
     script_detect.py      Latin vs Arabic heuristic
@@ -97,6 +105,26 @@ curl -s -H "X-API-Key: <key>" -F "file=@receipt.jpg" \
   http://localhost:8000/v1/process | jq
 ```
 
+### Processing a PDF
+
+Each page comes back as its own entry with its own workbook:
+
+```bash
+curl -s -F "file=@invoice.pdf" http://localhost:8000/v1/process-pdf | jq
+```
+
+The response has `page_count` and a `pages` array; each element has a
+`page_number`, the extracted `document`, and an `excel_filename` of the form
+`<pdf_hash>_p<N>.xlsx`. Download any page's workbook via the same endpoint:
+
+```bash
+curl -OJ http://localhost:8000/v1/download/<pdf_hash>_p1.xlsx
+```
+
+Re-uploading the same PDF returns `"cache_hit": true` and reuses every page's
+workbook. The `OCR_PDF_RENDER_DPI` (default 220) and `OCR_PDF_MAX_PAGES`
+(default 50) settings control rasterization sharpness and the per-file page cap.
+
 
 ## Docker
 
@@ -121,6 +149,8 @@ All settings are environment variables prefixed `OCR_` (or a `.env` file):
 | `OCR_CACHE_TTL_SECONDS` | `604800` | Cache lifetime; `0` = never expire |
 | `OCR_USE_GPU` | `false` | Use GPU for Paddle + TrOCR |
 | `OCR_MAX_UPLOAD_MB` | `25` | Upload size limit |
+| `OCR_PDF_RENDER_DPI` | `220` | DPI for rasterizing PDF pages before OCR |
+| `OCR_PDF_MAX_PAGES` | `50` | Max pages processed from one PDF |
 | `OCR_LOG_LEVEL` | `INFO` | Log level for the JSON logger |
 | `OCR_API_KEY` | _(empty)_ | If set, `/v1` routes require `X-API-Key`; empty disables auth |
 

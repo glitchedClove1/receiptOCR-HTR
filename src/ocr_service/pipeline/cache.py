@@ -17,9 +17,18 @@ from .config import Settings, get_settings
 from .schemas import Document
 
 
-def image_hash(data: bytes) -> str:
-    """SHA-256 of raw image bytes — the cache key."""
+def content_hash(data: bytes) -> str:
+    """SHA-256 of raw upload bytes — the cache key for an image or a PDF."""
     return hashlib.sha256(data).hexdigest()
+
+
+# Backward-compatible alias (image uploads).
+image_hash = content_hash
+
+
+def page_key(pdf_hash: str, page_number: int) -> str:
+    """Cache key for one page of a PDF: '<pdf_hash>_p<N>'."""
+    return f"{pdf_hash}_p{page_number}"
 
 
 class CacheBackend(Protocol):
