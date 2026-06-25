@@ -7,6 +7,7 @@ unit tests that don't touch real OCR don't pay the model-load cost.
 """
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from .config import Settings, get_settings
@@ -16,37 +17,48 @@ from .script_detect import detect_script
 
 
 def _normalize_paddle_result(raw) -> list[Region]:
-    """Convert PaddleOCR output into a list of `Region` objects.
-
-    PaddleOCR (.ocr) returns, per image, a list of
-        [ [polygon, (text, confidence)], ... ]
-    Newer versions nest results per page; we defensively unwrap one level.
-    """
     regions: list[Region] = []
     if not raw:
         return regions
 
-    page = raw[0] if (len(raw) == 1 and isinstance(raw[0], list)) else raw
-    for entry in page:
-        try:
-            polygon, (text, conf) = entry[0], entry[1]
-        except (ValueError, TypeError, IndexError):
-            continue
-        poly = [(float(x), float(y)) for x, y in polygon]
-        text = (text or "").strip()
-        if not text:
-            continue
-        regions.append(
-            Region(
-                text=text,
-                confidence=float(conf),
-                polygon=poly,
-                script=detect_script(text),
-                source=RecognizerSource.PADDLE,
-                paddle_text=text,
-                paddle_confidence=float(conf),
+    for res in raw:
+        def _get(key):
+            if isinstance(res, dict):
+                return res.get(key)
+            try:
+                return res[key]
+            except (TypeError, KeyError, IndexError):
+                return getattr(res, key, None)
+
+        texts = _get("rec_texts") or []
+        scores = _get("rec_scores") or []
+        polys = _get("rec_polys")
+        if polys is None:
+            polys = _get("dt_polys") or []
+
+        for text, conf, polygon in zip(texts, scores, polys):
+            text = (text or "").strip()
+            if not text:
+                continue
+            poly = []
+            try:
+                for point in polygon:
+                    poly.append((float(point[0]), float(point[1])))
+            except (TypeError, ValueError, IndexError):
+                poly = []
+            if not poly:
+                continue
+            regions.append(
+                Region(
+                    text=text,
+                    confidence=float(conf),
+                    polygon=poly,
+                    script=detect_script(text),
+                    source=RecognizerSource.PADDLE,
+                    paddle_text=text,
+                    paddle_confidence=float(conf),
+                )
             )
-        )
     return regions
 
 
@@ -54,5 +66,8 @@ def run_ocr(image: np.ndarray, settings: Settings | None = None) -> list[Region]
     """Run PaddleOCR on a (pre-processed) image and return Regions."""
     settings = settings or get_settings()
     ocr = get_paddle(settings)
-    raw = ocr.ocr(image, cls=True)
+    # PaddleOCR 3.x requires a 3-channel image; preprocessing always yields grayscale.
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    raw = list(ocr.predict(image))   # predict() is a generator in 3.x — materialize it
     return _normalize_paddle_result(raw)

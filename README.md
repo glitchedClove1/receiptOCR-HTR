@@ -125,6 +125,10 @@ Re-uploading the same PDF returns `"cache_hit": true` and reuses every page's
 workbook. The `OCR_PDF_RENDER_DPI` (default 220) and `OCR_PDF_MAX_PAGES`
 (default 50) settings control rasterization sharpness and the per-file page cap.
 
+# Output
+
+Output is found in /ocr_cache in root directory.
+
 
 ## Docker
 

@@ -161,7 +161,7 @@ async def process_pdf(file: UploadFile = File(...)) -> PdfProcessResponse:
         key = page_key(pdf_hash, page_number)
         doc = cache.get(key)
         if doc is None:
-            all_cached = page_number > 1  # nothing cached at all -> miss
+            all_cached = False
             break
         if not cache.has_excel(key):
             all_cached = False

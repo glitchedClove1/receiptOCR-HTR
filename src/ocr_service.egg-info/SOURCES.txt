@@ -21,8 +21,10 @@ src/ocr_service/pipeline/htr_fallback.py
 src/ocr_service/pipeline/model_loader.py
 src/ocr_service/pipeline/ocr_engine.py
 src/ocr_service/pipeline/orchestrator.py
+src/ocr_service/pipeline/pdf_render.py
 src/ocr_service/pipeline/preprocessing.py
 src/ocr_service/pipeline/schemas.py
 src/ocr_service/pipeline/script_detect.py
+tests/test_pdf.py
 tests/test_pipeline.py
 tests/test_service.py

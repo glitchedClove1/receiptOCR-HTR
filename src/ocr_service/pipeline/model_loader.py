@@ -38,10 +38,10 @@ def get_paddle(settings: Settings) -> Any:
 
             log.info("loading paddleocr", fields={"lang": settings.paddle_primary_lang})
             _paddle_instance = PaddleOCR(
-                use_angle_cls=True,
+                use_textline_orientation=True,        # replaces use_angle_cls
                 lang=settings.paddle_primary_lang,
-                use_gpu=settings.use_gpu,
-                show_log=False,
+                device="gpu" if settings.use_gpu else "cpu",
+                enable_mkldnn=False,
             )
             return _paddle_instance
         except Exception as exc:  # noqa: BLE001 - re-raised as domain error
