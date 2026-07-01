@@ -34,11 +34,17 @@ def get_paddle(settings: Settings) -> Any:
         if _paddle_instance is not None:  # re-check under lock
             return _paddle_instance
         try:
+            import os
             from paddleocr import PaddleOCR
+
+            # Disable oneDNN/MKL-DNN at the environment level — the PaddlePaddle
+            # CPU executor crashes on some Windows builds when it falls back from
+            # a failed GPU init while oneDNN is active.
+            os.environ.setdefault("FLAGS_use_mkldnn", "0")
 
             log.info("loading paddleocr", fields={"lang": settings.paddle_primary_lang})
             _paddle_instance = PaddleOCR(
-                use_textline_orientation=True,        # replaces use_angle_cls
+                use_textline_orientation=True,
                 lang=settings.paddle_primary_lang,
                 device="gpu" if settings.use_gpu else "cpu",
                 enable_mkldnn=False,

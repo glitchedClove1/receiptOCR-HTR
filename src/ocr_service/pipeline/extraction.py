@@ -16,6 +16,7 @@ from .correction import (
     parse_currency,
     parse_number,
 )
+from .llm_extraction import extract_extra_fields
 from .schemas import (
     Document,
     FieldValue,
@@ -38,18 +39,34 @@ _QTY_RE = re.compile(r"^\s*(\d{1,3})\s*[xX]?\s*$")
 _MONEY_RE = re.compile(r"\d+[.,]\d{2}")
 
 
-def _group_rows(regions: list[Region], y_tol: float = 12.0) -> list[list[Region]]:
+def _adaptive_y_tol(regions: list[Region], fallback: float = 12.0) -> float:
+    """Compute a row-grouping tolerance from the median region height.
+
+    Using 55% of the median text-line height keeps same-row regions together
+    while separating adjacent rows, regardless of scan resolution or font size.
+    """
+    if not regions:
+        return fallback
+    heights = []
+    for r in regions:
+        ys = [p[1] for p in r.polygon]
+        heights.append(max(ys) - min(ys))
+    median_h = sorted(heights)[len(heights) // 2]
+    return max(fallback, median_h * 0.55)
+
+
+def _group_rows(regions: list[Region], y_tol: float | None = None) -> list[list[Region]]:
     """Group regions into visual rows by vertical centre proximity.
 
-    Regions whose vertical centres fall within `y_tol` pixels are considered
-    the same row, then sorted left-to-right. `y_tol` scales with typical text
-    height; callers may widen it for low-DPI scans.
+    Tolerance is derived from the median region height when not specified,
+    so the grouping scales correctly across scan resolutions and font sizes.
     """
+    tol = y_tol if y_tol is not None else _adaptive_y_tol(regions)
     rows: list[list[Region]] = []
     for region in sorted(regions, key=lambda r: r.center_y):
         placed = False
         for row in rows:
-            if abs(row[0].center_y - region.center_y) <= y_tol:
+            if abs(row[0].center_y - region.center_y) <= tol:
                 row.append(region)
                 placed = True
                 break
@@ -161,6 +178,9 @@ def extract_document(
     # --- Line items: rows that have a description + at least one money token,
     #     excluding rows that matched totals/tax cues. ------------------------
     doc.line_items = _extract_line_items(rows)
+
+    # --- LLM extraction: transcribe every field visible on the document. -----
+    doc.extra_fields = extract_extra_fields(rows, settings)
 
     return doc
 

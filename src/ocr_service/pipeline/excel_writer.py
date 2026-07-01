@@ -51,17 +51,7 @@ def write_workbook(
         c.fill = _HEADER_FILL
         c.font = _HEADER_FONT
 
-    field_rows = [
-        ("Vendor", doc.vendor),
-        ("Document Date", doc.document_date),
-        ("Invoice Number", doc.invoice_number),
-        ("Vendor Tax ID", doc.vendor_tax_id),
-        ("Subtotal", doc.subtotal),
-        ("Tax / TVA", doc.tax),
-        ("Grand Total", doc.grand_total),
-        ("Currency", doc.currency),
-    ]
-    for label, fv in field_rows:
+    for label, fv in doc.extra_fields.items():
         row = _row_for(label, fv)
         ws.append(row)
         if fv.needs_review:

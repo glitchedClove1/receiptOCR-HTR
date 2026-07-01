@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     # --- Device -------------------------------------------------------------
     use_gpu: bool = Field(default=False)
 
+    # --- LLM enrichment (Ollama) --------------------------------------------
+    # Set OCR_OLLAMA_ENABLED=false to skip the LLM pass entirely.
+    ollama_enabled: bool = Field(default=True)
+    ollama_base_url: str = Field(default="http://localhost:11434")
+    ollama_model: str = Field(default="qwen2.5:3b")
+    ollama_timeout_seconds: int = Field(default=180)
+
 
 @lru_cache
 def get_settings() -> Settings:

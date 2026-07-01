@@ -38,21 +38,28 @@ def remove_noise(gray: np.ndarray) -> np.ndarray:
     return cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
 
 
+_MAX_SKEW_DEGREES = 15.0
+
+
 def _detect_skew_angle(gray: np.ndarray) -> float:
     """Estimate document skew in degrees via the minAreaRect of dark pixels.
 
-    Returns a small correction angle. Robust enough for the +/-15 deg skew
-    typical of hand-fed scans and photos; extreme rotations are out of scope.
+    Returns a small correction angle in the range (-15, +15) degrees.
+    minAreaRect on the full page can return angles near ±90° when it locks
+    onto the page bounding box rather than text line orientation — those are
+    clamped to 0 so we never apply a catastrophic rotation to a good image.
     """
-    # Invert + threshold so text is the foreground (non-zero).
     thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
     coords = np.column_stack(np.where(thresh > 0))
-    if coords.shape[0] < 50:  # too little ink to estimate reliably
+    if coords.shape[0] < 50:
         return 0.0
     angle = cv2.minAreaRect(coords)[-1]
     # OpenCV returns angle in [-90, 0); normalize to a small correction.
     if angle < -45:
         angle = 90 + angle
+    # Discard implausible angles — they indicate a bad minAreaRect estimate.
+    if abs(angle) > _MAX_SKEW_DEGREES:
+        return 0.0
     return -angle
 
 
