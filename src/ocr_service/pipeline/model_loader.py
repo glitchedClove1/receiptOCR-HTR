@@ -8,6 +8,7 @@ broken half-initialized object.
 """
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any
 
@@ -34,7 +35,6 @@ def get_paddle(settings: Settings) -> Any:
         if _paddle_instance is not None:  # re-check under lock
             return _paddle_instance
         try:
-            import os
             from paddleocr import PaddleOCR
 
             # Disable oneDNN/MKL-DNN at the environment level — the PaddlePaddle

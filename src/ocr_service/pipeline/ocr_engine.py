@@ -21,22 +21,22 @@ def _normalize_paddle_result(raw) -> list[Region]:
     if not raw:
         return regions
 
+    def _get(res, key):
+        if isinstance(res, dict):
+            return res.get(key)
+        try:
+            return res[key]
+        except (TypeError, KeyError, IndexError):
+            return getattr(res, key, None)
+
     for res in raw:
-        def _get(key):
-            if isinstance(res, dict):
-                return res.get(key)
-            try:
-                return res[key]
-            except (TypeError, KeyError, IndexError):
-                return getattr(res, key, None)
-
-        texts = _get("rec_texts") or []
-        scores = _get("rec_scores") or []
-        polys = _get("rec_polys")
+        texts = _get(res, "rec_texts") or []
+        scores = _get(res, "rec_scores") or []
+        polys = _get(res, "rec_polys")
         if polys is None:
-            polys = _get("dt_polys") or []
+            polys = _get(res, "dt_polys") or []
 
-        for text, conf, polygon in zip(texts, scores, polys):
+        for text, conf, polygon in zip(texts, scores, polys, strict=False):
             text = (text or "").strip()
             if not text:
                 continue

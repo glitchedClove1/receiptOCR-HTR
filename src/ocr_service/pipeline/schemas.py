@@ -96,7 +96,7 @@ class Document(BaseModel):
 
     # Dynamic fields extracted by the LLM enrichment pass (anything beyond the
     # fixed schema above that appears on the document).
-    extra_fields: dict[str, "FieldValue"] = Field(default_factory=dict)
+    extra_fields: dict[str, FieldValue] = Field(default_factory=dict)
 
     # Diagnostics
     preprocessing_applied: list[str] = Field(default_factory=list)

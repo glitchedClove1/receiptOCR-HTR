@@ -161,7 +161,9 @@ def _try_model(
         return None
 
     if not isinstance(parsed, dict):
-        log.warning("ollama_unexpected_shape", fields={"model": model, "type": type(parsed).__name__})
+        log.warning("ollama_unexpected_shape", fields={
+            "model": model, "type": type(parsed).__name__,
+        })
         return None
 
     return parsed
@@ -196,7 +198,9 @@ def extract_extra_fields(
         chain = chain[chain.index(_working_model):]
 
     for model in chain:
-        parsed = _try_model(model, prompt, settings.ollama_base_url, settings.ollama_timeout_seconds)
+        parsed = _try_model(
+            model, prompt, settings.ollama_base_url, settings.ollama_timeout_seconds
+        )
         if parsed is None:
             continue
 
