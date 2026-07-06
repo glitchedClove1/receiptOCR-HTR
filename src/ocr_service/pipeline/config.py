@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Set OCR_OLLAMA_ENABLED=false to skip the LLM pass entirely.
     ollama_enabled: bool = Field(default=True)
     ollama_base_url: str = Field(default="http://localhost:11434")
+    # Vision-Language Model for primary extraction (sees the raw image directly).
+    # Set to "" to skip the VLM pass and use the text model only.
+    vlm_model: str = Field(default="qwen2.5vl:3b")
+    # Text-only fallback model used when the VLM is unavailable or fails.
     ollama_model: str = Field(default="qwen2.5:3b")
     ollama_timeout_seconds: int = Field(default=180)
 

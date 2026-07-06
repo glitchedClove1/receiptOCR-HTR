@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 
+import numpy as np
+
 from .config import Settings, get_settings
 from .correction import (
     correct_text,
@@ -105,7 +107,9 @@ def _extract_money_after_cue(row: list[Region]) -> tuple | None:
 
 
 def extract_document(
-    regions: list[Region], settings: Settings | None = None
+    regions: list[Region],
+    settings: Settings | None = None,
+    image: np.ndarray | None = None,
 ) -> Document:
     """Run the full rule-based extraction over recognized regions."""
     settings = settings or get_settings()
@@ -180,7 +184,7 @@ def extract_document(
     doc.line_items = _extract_line_items(rows)
 
     # --- LLM extraction: transcribe every field visible on the document. -----
-    doc.extra_fields = extract_extra_fields(rows, settings)
+    doc.extra_fields = extract_extra_fields(rows, settings, image=image)
 
     return doc
 

@@ -72,7 +72,7 @@ def process_image_array(
 
     # Structured extraction.
     try:
-        doc: Document = extract_document(regions, settings)
+        doc: Document = extract_document(regions, settings, image=processed)
     except Exception as exc:  # noqa: BLE001
         log.error("extraction failed", fields={"error": str(exc)})
         raise PipelineError(str(exc)) from exc
