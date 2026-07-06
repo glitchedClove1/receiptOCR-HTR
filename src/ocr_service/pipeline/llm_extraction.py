@@ -191,7 +191,9 @@ def _try_vlm_model(
         "images": [image_b64],
         "format": "json",
         "stream": False,
-        "options": {"temperature": 0.0},
+        # Images consume many tokens; 8192 comfortably fits a full invoice
+        # image + prompt without hitting the default 4096 token context limit.
+        "options": {"temperature": 0.0, "num_ctx": 8192},
     }
     try:
         resp = requests.post(
