@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from . import __version__
 from .auth import require_api_key
@@ -31,6 +35,7 @@ from .logging_config import configure_logging, get_logger, request_id_var
 from .pipeline.cache import content_hash, get_cache, image_hash, page_key
 from .pipeline.config import get_settings
 from .pipeline.excel_writer import write_workbook
+from .pipeline.model_loader import get_paddle
 from .pipeline.orchestrator import process_image_bytes, process_pdf_bytes
 from .pipeline.schemas import (
     PageResult,
@@ -42,13 +47,50 @@ settings = get_settings()
 configure_logging(settings.log_level)
 log = get_logger(__name__)
 
-app = FastAPI(title="Financial OCR Service", version=__version__)
+# Rate limiter — keyed by client IP.
+limiter = Limiter(key_func=get_remote_address)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Warm up PaddleOCR before the first request so it doesn't slow it down."""
+    try:
+        get_paddle(settings)
+        log.info("model_warmup_complete")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("model_warmup_failed", fields={"error": str(exc)})
+    yield
+
+
+app = FastAPI(title="Financial OCR Service", version=__version__, lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 cache = get_cache(settings)
 router = APIRouter(prefix="/v1")
 
 _ALLOWED = {"image/jpeg", "image/png", "image/jpg", "image/webp",
             "image/tiff", "image/bmp"}
 _PDF_TYPES = {"application/pdf"}
+
+# Magic byte signatures — checked against raw file bytes to prevent spoofed MIME types.
+_MAGIC: list[tuple[bytes, set[str]]] = [
+    (b"\xff\xd8\xff",       {"image/jpeg", "image/jpg"}),
+    (b"\x89PNG\r\n\x1a\n", {"image/png"}),
+    (b"%PDF",               {"application/pdf"}),
+    (b"II*\x00",            {"image/tiff"}),
+    (b"MM\x00*",            {"image/tiff"}),
+    (b"BM",                 {"image/bmp"}),
+]
+
+
+def _magic_ok(data: bytes, content_type: str) -> bool:
+    """Return True if the file's magic bytes match the declared content type."""
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return content_type == "image/webp"
+    for magic, types in _MAGIC:
+        if data.startswith(magic):
+            return content_type in types
+    return False
 
 
 @app.middleware("http")
@@ -105,7 +147,8 @@ def health() -> dict:
 
 @router.post("/process", response_model=ProcessResponse,
              dependencies=[Depends(require_api_key)])
-async def process(file: UploadFile = File(...)) -> ProcessResponse:
+@limiter.limit("20/minute")
+async def process(request: Request, file: UploadFile = File(...)) -> ProcessResponse:
     if file.content_type not in _ALLOWED:
         raise UnsupportedMediaError(f"Unsupported content type: {file.content_type}")
 
@@ -114,6 +157,8 @@ async def process(file: UploadFile = File(...)) -> ProcessResponse:
         raise InvalidImageError("Empty upload.")
     if len(data) > settings.max_upload_mb * 1024 * 1024:
         raise PayloadTooLargeError("File too large.")
+    if not _magic_ok(data, file.content_type or ""):
+        raise InvalidImageError("File content does not match declared type.")
 
     key = image_hash(data)
     excel_name = f"{key}.xlsx"
@@ -136,7 +181,8 @@ async def process(file: UploadFile = File(...)) -> ProcessResponse:
 
 @router.post("/process-pdf", response_model=PdfProcessResponse,
              dependencies=[Depends(require_api_key)])
-async def process_pdf(file: UploadFile = File(...)) -> PdfProcessResponse:
+@limiter.limit("5/minute")
+async def process_pdf(request: Request, file: UploadFile = File(...)) -> PdfProcessResponse:
     """Process a PDF: each page becomes its own document + workbook.
 
     The whole-PDF hash gates caching; a re-uploaded identical PDF returns the
@@ -150,6 +196,8 @@ async def process_pdf(file: UploadFile = File(...)) -> PdfProcessResponse:
         raise InvalidPdfError("Empty upload.")
     if len(data) > settings.max_upload_mb * 1024 * 1024:
         raise PayloadTooLargeError("File too large.")
+    if not _magic_ok(data, file.content_type or ""):
+        raise InvalidPdfError("File content does not match declared type.")
 
     pdf_hash = content_hash(data)
 

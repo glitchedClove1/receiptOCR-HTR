@@ -143,12 +143,28 @@ def _rows_to_text(rows: list[list[Region]]) -> str:
     return "\n".join(lines)
 
 
+_VLM_MAX_SIDE = 1024
+
+
 def _encode_image(image: np.ndarray) -> str:
-    """Encode a numpy image array to a base64 JPEG string for Ollama."""
+    """Encode a numpy image array to a base64 JPEG string for Ollama.
+
+    Downscales the image so its longest side is at most _VLM_MAX_SIDE pixels
+    before encoding. High-DPI scans can otherwise exceed the model's context
+    window just from image tokens alone.
+    """
     if image.ndim == 2:
         img_bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     else:
         img_bgr = image
+    h, w = img_bgr.shape[:2]
+    if max(h, w) > _VLM_MAX_SIDE:
+        scale = _VLM_MAX_SIDE / max(h, w)
+        img_bgr = cv2.resize(
+            img_bgr,
+            (int(w * scale), int(h * scale)),
+            interpolation=cv2.INTER_AREA,
+        )
     ok, buf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
     if not ok:
         raise ValueError("cv2.imencode failed")
