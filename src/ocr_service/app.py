@@ -11,9 +11,11 @@ existing callers.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
+from functools import partial
 
 from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -169,7 +171,8 @@ async def process(request: Request, file: UploadFile = File(...)) -> ProcessResp
         return ProcessResponse(cache_hit=True, image_hash=key,
                                excel_filename=excel_name, document=cached)
 
-    doc = process_image_bytes(data, settings)  # raises domain errors
+    loop = asyncio.get_running_loop()
+    doc = await loop.run_in_executor(None, partial(process_image_bytes, data, settings))
     write_workbook(doc, cache.excel_path(key), settings)
     cache.put(key, doc)
     log.info("processed", fields={"image_hash": key, "regions": doc.region_count,
@@ -225,8 +228,14 @@ async def process_pdf(request: Request, file: UploadFile = File(...)) -> PdfProc
                                   page_count=len(cached_pages), pages=cached_pages)
 
     # --- Full processing, page by page -------------------------------------
+    # Run the entire blocking pipeline (OCR + Ollama) in a thread so the
+    # event loop stays free for other requests during inference.
+    loop = asyncio.get_running_loop()
+    pairs = await loop.run_in_executor(
+        None, lambda: list(process_pdf_bytes(data, settings))
+    )
     pages: list[PageResult] = []
-    for num, doc in process_pdf_bytes(data, settings):  # raises domain errors
+    for num, doc in pairs:
         key = page_key(pdf_hash, num)
         write_workbook(doc, cache.excel_path(key), settings)
         cache.put(key, doc)
