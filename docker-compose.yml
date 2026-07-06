@@ -8,7 +8,9 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      # NB: the ollama/ollama image ships neither curl nor wget — the ollama
+      # CLI itself is the only reliable probe.
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -33,14 +35,16 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
-    # Pull VLM (primary) then text fallback. --max-time 600 covers cold
-    # pulls on slow connections; existing models are skipped by Ollama.
+    # Pull VLM (primary) then text fallback. -f makes an HTTP error fail the
+    # init container (otherwise the stack would boot with no models and
+    # silently return empty fields). --max-time 7200 accommodates cold ~2GB
+    # pulls on slow links; already-present models return immediately.
     entrypoint: ["/bin/sh", "-c"]
     command: >
-      "curl -s -X POST http://ollama:11434/api/pull
-        -d '{\"name\":\"qwen2.5vl:3b\",\"stream\":false}' --max-time 600 &&
-       curl -s -X POST http://ollama:11434/api/pull
-        -d '{\"name\":\"qwen2.5:3b\",\"stream\":false}' --max-time 300"
+      "curl -sf -X POST http://ollama:11434/api/pull
+        -d '{\"name\":\"qwen2.5vl:3b\",\"stream\":false}' --max-time 7200 &&
+       curl -sf -X POST http://ollama:11434/api/pull
+        -d '{\"name\":\"qwen2.5:3b\",\"stream\":false}' --max-time 7200"
     restart: "no"
 
   # ── OCR service ─────────────────────────────────────────────────────────────
@@ -66,13 +70,15 @@ services:
       # Set a non-empty key to require X-API-Key on /v1 routes.
       OCR_API_KEY: ""
     volumes:
-      # Result cache — identical documents return instantly on re-upload.
+      # Result cache — identical documents return instantly on re-upload,
+      # and generated workbooks live here (served via /v1/download).
       - ocr_cache:/srv/.ocr_cache
-      # Generated Excel workbooks — mount a host path to access them directly.
-      - ./outputs:/srv/outputs
       # HuggingFace + PaddleOCR weight caches — persist across rebuilds.
+      # Mount points are pre-created and chowned in the Dockerfile so the
+      # non-root user can write to them. PaddleOCR 3.x caches under
+      # ~/.paddlex (not ~/.paddleocr).
       - hf_cache:/home/appuser/.cache/huggingface
-      - paddle_cache:/home/appuser/.paddleocr
+      - paddle_cache:/home/appuser/.paddlex
 
 volumes:
   ollama_data:   # Ollama model weights

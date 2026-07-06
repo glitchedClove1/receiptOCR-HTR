@@ -16,16 +16,20 @@ RUN pip install --no-cache-dir ".[ocr]"
 # Non-root user for runtime security.
 RUN useradd --create-home --uid 10001 appuser
 
-# Persistent directories for the result cache and generated Excel files.
-# Mount both as named volumes in production so data survives container restarts.
+# Result cache directory (documents + workbooks, served via /v1/download).
 ENV OCR_CACHE_DIR=/srv/.ocr_cache \
-    OCR_OUTPUT_DIR=/srv/outputs \
     OCR_OLLAMA_BASE_URL=http://ollama:11434
 
-RUN mkdir -p /srv/.ocr_cache /srv/outputs && chown -R appuser:appuser /srv
+# Pre-create every directory a named volume mounts over, owned by appuser —
+# Docker creates missing mountpoints as root, which would break model-weight
+# downloads for the non-root user. PaddleOCR 3.x caches under ~/.paddlex.
+RUN mkdir -p /srv/.ocr_cache \
+        /home/appuser/.cache/huggingface \
+        /home/appuser/.paddlex \
+    && chown -R appuser:appuser /srv /home/appuser
 USER appuser
 
-VOLUME ["/srv/.ocr_cache", "/srv/outputs"]
+VOLUME ["/srv/.ocr_cache"]
 
 EXPOSE 8000
 
