@@ -1,28 +1,81 @@
 services:
+
+  # ── Ollama inference server ─────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    # GPU support — uncomment the block below if you have an NVIDIA GPU and
+    # nvidia-container-toolkit installed on the host.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ── Pull required models on first start ────────────────────────────────────
+  # This one-shot container runs after Ollama is healthy and pulls the two
+  # models the service uses. It exits once the pull is complete; subsequent
+  # `docker compose up` calls skip the pull because the weights are in the
+  # ollama_data volume.
+  ollama-init:
+    image: curlimages/curl:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    # Pull VLM (primary) then text fallback. --max-time 600 covers cold
+    # pulls on slow connections; existing models are skipped by Ollama.
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "curl -s -X POST http://ollama:11434/api/pull
+        -d '{\"name\":\"qwen2.5vl:3b\",\"stream\":false}' --max-time 600 &&
+       curl -s -X POST http://ollama:11434/api/pull
+        -d '{\"name\":\"qwen2.5:3b\",\"stream\":false}' --max-time 300"
+    restart: "no"
+
+  # ── OCR service ─────────────────────────────────────────────────────────────
   ocr:
     build: .
     ports:
       - "8000:8000"
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
     environment:
-      # Override any OCR_* setting here. Examples:
+      # Ollama sidecar address (matches the service name above).
+      OCR_OLLAMA_BASE_URL: "http://ollama:11434"
+      OCR_VLM_MODEL: "qwen2.5vl:3b"
+      OCR_OLLAMA_MODEL: "qwen2.5:3b"
+      # Tune these via environment or a .env file — no rebuild required.
       OCR_CONFIDENCE_THRESHOLD: "0.80"
       OCR_PADDLE_PRIMARY_LANG: "fr"
       OCR_USE_GPU: "false"
       OCR_LOG_LEVEL: "INFO"
-      # Set a key to require X-API-Key on /v1 routes; empty disables auth.
+      # Set a non-empty key to require X-API-Key on /v1 routes.
       OCR_API_KEY: ""
     volumes:
-      # Persist model weights cache (HuggingFace/Paddle) and the result cache.
-      - ./.ocr_cache:/srv/.ocr_cache
+      # Result cache — identical documents return instantly on re-upload.
+      - ocr_cache:/srv/.ocr_cache
+      # Generated Excel workbooks — mount a host path to access them directly.
+      - ./outputs:/srv/outputs
+      # HuggingFace + PaddleOCR weight caches — persist across rebuilds.
       - hf_cache:/home/appuser/.cache/huggingface
       - paddle_cache:/home/appuser/.paddleocr
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 40s
 
 volumes:
-  hf_cache:
-  paddle_cache:
+  ollama_data:   # Ollama model weights
+  ocr_cache:     # Processed document cache
+  hf_cache:      # HuggingFace model weights (TrOCR)
+  paddle_cache:  # PaddleOCR model weights

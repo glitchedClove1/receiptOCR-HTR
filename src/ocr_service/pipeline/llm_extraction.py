@@ -30,6 +30,7 @@ import numpy as np
 import requests
 
 from ..logging_config import get_logger
+from ..metrics import LLM_CALLS
 from .config import Settings
 from .schemas import FieldValue, Region
 
@@ -73,6 +74,11 @@ Each key is a short descriptive English field name.
 Each value is a non-empty string taken directly from the document.
 OMIT any field whose value is empty, unknown, or not visible.
 Do not invent values. Do not include placeholder or template fields.
+
+Confidence rule: if you are not certain about a value (e.g. blurry text, \
+partial occlusion, ambiguous character), append a single question mark to \
+that value — for example "FC002366?" or "2024-01-15?". Do NOT append ? to \
+values you are confident about.
 
 Examples of what to extract when present:
 Vendor Name, Vendor Address, Fiscal Matrix Number, CCB Number,
@@ -261,12 +267,23 @@ def _try_text_model(
     return _parse_response(resp, model)
 
 
-def _fields_from_parsed(parsed: dict, model: str) -> dict[str, FieldValue]:
+def _fields_from_parsed(
+    parsed: dict, model: str, path: str, flag_uncertain: bool = False
+) -> dict[str, FieldValue]:
     result: dict[str, FieldValue] = {}
     for label, val in _flatten(parsed).items():
-        if label and val:
-            result[label] = FieldValue(value=val, corrected=False, needs_review=False)
+        if not (label and val):
+            continue
+        needs_review = False
+        if flag_uncertain and val.endswith("?"):
+            val = val[:-1].strip()
+            needs_review = True
+        if val:
+            result[label] = FieldValue(
+                value=val, corrected=False, needs_review=needs_review
+            )
     log.info("ollama_fields_extracted", fields={"model": model, "count": len(result)})
+    LLM_CALLS.labels(model=model, path=path).inc()
     return result
 
 
@@ -318,7 +335,7 @@ def extract_extra_fields(
                 if _working_vlm_model != model:
                     log.info("vlm_working_model_set", fields={"model": model})
                     _working_vlm_model = model
-                return _fields_from_parsed(parsed, model)
+                return _fields_from_parsed(parsed, model, path="vlm", flag_uncertain=True)
 
             log.warning("vlm_all_models_failed", fields={"chain": chain})
 
@@ -343,7 +360,7 @@ def extract_extra_fields(
         if _working_model != model:
             log.info("ollama_working_model_set", fields={"model": model})
             _working_model = model
-        return _fields_from_parsed(parsed, model)
+        return _fields_from_parsed(parsed, model, path="text")
 
     log.warning("ollama_all_models_failed", fields={"chain": chain})
     return {}

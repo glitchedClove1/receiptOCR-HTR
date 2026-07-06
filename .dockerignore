@@ -1,0 +1,13 @@
+.venv/
+.ocr_cache/
+outputs/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+diagnose.py
+samples/
+tests/
+*.md

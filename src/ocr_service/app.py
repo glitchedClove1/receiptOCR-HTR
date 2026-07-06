@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from functools import partial
@@ -34,6 +35,7 @@ from .exceptions import (
     UnsupportedMediaError,
 )
 from .logging_config import configure_logging, get_logger, request_id_var
+from .metrics import FIELDS_EXTRACTED, PROCESSING_SECONDS, REGIONS_DETECTED, REQUESTS, metrics_app
 from .pipeline.cache import content_hash, get_cache, image_hash, page_key
 from .pipeline.config import get_settings
 from .pipeline.excel_writer import write_workbook
@@ -67,6 +69,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Financial OCR Service", version=__version__, lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.mount("/metrics", metrics_app)
 cache = get_cache(settings)
 router = APIRouter(prefix="/v1")
 
@@ -168,13 +171,19 @@ async def process(request: Request, file: UploadFile = File(...)) -> ProcessResp
     cached = cache.get(key)
     if cached is not None and cache.has_excel(key):
         log.info("cache hit", fields={"image_hash": key})
+        REQUESTS.labels(type="image", outcome="cache_hit").inc()
         return ProcessResponse(cache_hit=True, image_hash=key,
                                excel_filename=excel_name, document=cached)
 
     loop = asyncio.get_running_loop()
+    t0 = time.perf_counter()
     doc = await loop.run_in_executor(None, partial(process_image_bytes, data, settings))
+    PROCESSING_SECONDS.labels(type="image").observe(time.perf_counter() - t0)
     write_workbook(doc, cache.excel_path(key), settings)
     cache.put(key, doc)
+    REQUESTS.labels(type="image", outcome="success").inc()
+    REGIONS_DETECTED.labels(type="image").observe(doc.region_count)
+    FIELDS_EXTRACTED.labels(type="image").observe(len(doc.extra_fields))
     log.info("processed", fields={"image_hash": key, "regions": doc.region_count,
                                   "low_confidence": doc.low_confidence_count})
 
@@ -224,6 +233,7 @@ async def process_pdf(request: Request, file: UploadFile = File(...)) -> PdfProc
     if all_cached and cached_pages:
         log.info("pdf cache hit", fields={"pdf_hash": pdf_hash,
                                           "pages": len(cached_pages)})
+        REQUESTS.labels(type="pdf", outcome="cache_hit").inc()
         return PdfProcessResponse(cache_hit=True, pdf_hash=pdf_hash,
                                   page_count=len(cached_pages), pages=cached_pages)
 
@@ -231,9 +241,11 @@ async def process_pdf(request: Request, file: UploadFile = File(...)) -> PdfProc
     # Run the entire blocking pipeline (OCR + Ollama) in a thread so the
     # event loop stays free for other requests during inference.
     loop = asyncio.get_running_loop()
+    t0 = time.perf_counter()
     pairs = await loop.run_in_executor(
         None, lambda: list(process_pdf_bytes(data, settings))
     )
+    total_seconds = time.perf_counter() - t0
     pages: list[PageResult] = []
     for num, doc in pairs:
         key = page_key(pdf_hash, num)
@@ -241,7 +253,11 @@ async def process_pdf(request: Request, file: UploadFile = File(...)) -> PdfProc
         cache.put(key, doc)
         pages.append(PageResult(page_number=num,
                                 excel_filename=f"{key}.xlsx", document=doc))
+        REGIONS_DETECTED.labels(type="pdf").observe(doc.region_count)
+        FIELDS_EXTRACTED.labels(type="pdf").observe(len(doc.extra_fields))
 
+    REQUESTS.labels(type="pdf", outcome="success").inc()
+    PROCESSING_SECONDS.labels(type="pdf").observe(total_seconds)
     log.info("pdf processed", fields={"pdf_hash": pdf_hash, "pages": len(pages)})
     return PdfProcessResponse(cache_hit=False, pdf_hash=pdf_hash,
                               page_count=len(pages), pages=pages)
