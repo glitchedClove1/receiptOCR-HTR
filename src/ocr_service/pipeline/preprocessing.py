@@ -54,9 +54,14 @@ def _detect_skew_angle(gray: np.ndarray) -> float:
     if coords.shape[0] < 50:
         return 0.0
     angle = cv2.minAreaRect(coords)[-1]
-    # OpenCV returns angle in [-90, 0); normalize to a small correction.
+    # Normalize the minAreaRect angle convention to a small correction around
+    # zero. OpenCV < 4.5 returns [-90, 0); OpenCV >= 4.5 returns (0, 90] — a
+    # -3 deg clockwise skew comes back as ~87, which must map to -3, not be
+    # discarded by the plausibility clamp.
     if angle < -45:
-        angle = 90 + angle
+        angle += 90
+    elif angle > 45:
+        angle -= 90
     # Discard implausible angles — they indicate a bad minAreaRect estimate.
     if abs(angle) > _MAX_SKEW_DEGREES:
         return 0.0

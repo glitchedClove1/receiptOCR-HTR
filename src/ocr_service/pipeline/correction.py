@@ -42,7 +42,7 @@ def _is_numeric_dominant(token: str) -> bool:
 _CURRENCY_SYMBOLS = {
     "€": "EUR", "$": "USD", "£": "GBP",
     "DT": "TND", "TND": "TND", "DH": "MAD",
-    "EUR": "EUR", "USD": "USD",
+    "EUR": "EUR", "USD": "USD", "GBP": "GBP",
 }
 _CURRENCY_RE = re.compile(
     r"(€|\$|£|\bDT\b|\bTND\b|\bDH\b|\bEUR\b|\bUSD\b|\bGBP\b)", re.IGNORECASE
@@ -171,8 +171,9 @@ def normalize_date(text: str) -> str | None:
             except ValueError:
                 pass
 
-    m = _NUM_DATE_RE.search(text)
-    if m:
+    # Try every numeric candidate, not just the first: a malformed reference
+    # like '123/45/6789' earlier in the text must not mask a real date later.
+    for m in _NUM_DATE_RE.finditer(text):
         a, b, c = m.group(1), m.group(2), m.group(3)
         if len(a) == 4:  # yyyy-mm-dd
             year, month, day = int(a), int(b), int(c)
@@ -184,6 +185,6 @@ def normalize_date(text: str) -> str | None:
         try:
             return date(year, month, day).isoformat()
         except ValueError:
-            return None
+            continue
 
     return None

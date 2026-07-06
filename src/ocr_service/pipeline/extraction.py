@@ -13,7 +13,6 @@ import numpy as np
 
 from .config import Settings, get_settings
 from .correction import (
-    correct_text,
     normalize_date,
     parse_currency,
     parse_number,
@@ -30,7 +29,14 @@ from .schemas import (
 # Keyword cues (FR + EN). Lowercased substring match.
 _TOTAL_CUES = ("total ttc", "grand total", "total a payer", "net a payer",
                "total", "montant total")
-_SUBTOTAL_CUES = ("sous-total", "sous total", "subtotal", "total ht", "ht")
+# Cues that unambiguously mean the grand total. A row hitting one of these is
+# never routed to tax, even if it also contains "taxes" (e.g. the standard FR
+# boilerplate "TOTAL TTC toutes taxes comprises").
+_GRAND_STRONG_CUES = ("total ttc", "grand total", "total a payer",
+                      "net a payer", "montant total")
+# NB: bare "ht" is intentionally NOT a cue — it substring-matches English
+# words (freight, light, weight...). " ht " (word-bounded) covers "Montant HT".
+_SUBTOTAL_CUES = ("sous-total", "sous total", "subtotal", "total ht", " ht ")
 _TAX_CUES = ("tva", "vat", "tax", "taxe")
 _INVOICE_CUES = ("facture", "invoice", "recu", "reçu", "ticket", "n°", "no.", "no ")
 _TAXID_CUES = ("matricule fiscal", "tax id", "vat number", "siret", "if ",
@@ -38,7 +44,11 @@ _TAXID_CUES = ("matricule fiscal", "tax id", "vat number", "siret", "if ",
 _DATE_CUES = ("date", "le ")
 
 _QTY_RE = re.compile(r"^\s*(\d{1,3})\s*[xX]?\s*$")
-_MONEY_RE = re.compile(r"\d+[.,]\d{2}")
+# Matches a full monetary token, including grouped thousands ("1.234,56",
+# "1,234.56", "1 234,56") and 2-3 decimal places (TND uses 3). The grouped
+# alternative must come first so finditer consumes the whole token instead of
+# fragmenting it (e.g. "1.234,56" must not match as "1.23" + "4,56").
+_MONEY_RE = re.compile(r"\d{1,3}(?:[ \u00A0.,]\d{3})+[.,]\d{2,3}|\d+[.,]\d{2,3}")
 
 
 def _adaptive_y_tol(regions: list[Region], fallback: float = 12.0) -> float:
@@ -79,15 +89,22 @@ def _group_rows(regions: list[Region], y_tol: float | None = None) -> list[list[
     return rows
 
 
+def _needs_review(region: Region) -> bool:
+    """A region needs human review if it is low-confidence Arabic, came from
+    the HTR fallback, or the fallback was attempted but failed."""
+    return (region.low_confidence_arabic
+            or region.source == RecognizerSource.TROCR
+            or region.fallback_failed)
+
+
 def _field_from_region(region: Region, value: str, corrected: bool) -> FieldValue:
-    """Build a FieldValue, flagging review for low-conf or Arabic regions."""
+    """Build a FieldValue, flagging review for unreliable regions."""
     return FieldValue(
         value=value,
         source=region.source,
         confidence=region.confidence,
         corrected=corrected,
-        needs_review=region.low_confidence_arabic
-        or region.source == RecognizerSource.TROCR,
+        needs_review=_needs_review(region),
     )
 
 
@@ -115,10 +132,7 @@ def extract_document(
     settings = settings or get_settings()
     doc = Document()
     doc.region_count = len(regions)
-    doc.low_confidence_count = sum(
-        1 for r in regions
-        if r.low_confidence_arabic or r.source == RecognizerSource.TROCR
-    )
+    doc.low_confidence_count = sum(1 for r in regions if _needs_review(r))
 
     rows = _group_rows(regions)
 
@@ -130,6 +144,9 @@ def extract_document(
             break
 
     currency_seen: str | None = None
+    # First date seen WITHOUT a "Date:" cue — used only if no cued date exists,
+    # so a billing-period or delivery date can't hijack the document date.
+    uncued_date: tuple[str, Region] | None = None
 
     # --- Scan rows for header fields and totals ------------------------------
     for row in rows:
@@ -141,40 +158,49 @@ def extract_document(
             if cur:
                 currency_seen = cur
 
-        # Date
+        # Date — cued rows win; un-cued dates are only a post-loop fallback.
         if doc.document_date.value is None and _has_cue(low, _DATE_CUES):
             iso = normalize_date(joined)
             if iso:
                 doc.document_date = _field_from_region(row[0], iso, True)
-        if doc.document_date.value is None:  # date may appear without a cue
+        elif uncued_date is None:
             iso = normalize_date(joined)
             if iso:
-                doc.document_date = _field_from_region(row[0], iso, True)
+                uncued_date = (iso, row[0])
 
-        # Invoice number
+        # Invoice number. NB: no confusable correction here — identifiers like
+        # 'IN2024-001' are not numeric context and correction corrupts them.
         if doc.invoice_number.value is None and _has_cue(low, _INVOICE_CUES):
             m = re.search(r"(?:n[°o]\.?|no\.?|#)\s*([A-Za-z0-9\-/]+)", joined,
                           re.IGNORECASE)
             if m:
-                corrected, ch = correct_text(m.group(1))
-                doc.invoice_number = _field_from_region(row[0], corrected, ch)
+                doc.invoice_number = _field_from_region(row[0], m.group(1), False)
 
-        # Tax ID
+        # Tax ID — must contain at least one digit so an uppercase label
+        # ("MATRICULE FISCAL ...") is never captured as the ID itself.
         if doc.vendor_tax_id.value is None and _has_cue(low, _TAXID_CUES):
-            m = re.search(r"([A-Z0-9]{6,}[A-Z0-9/\-]*)", joined)
+            m = re.search(r"(?=[A-Z0-9/\-]*\d)([A-Z0-9]{6,}[A-Z0-9/\-]*)", joined)
             if m:
                 doc.vendor_tax_id = _field_from_region(row[0], m.group(1), False)
 
-        # Totals — order matters: check grand total cues before bare 'total'.
+        # Totals routing. A row with a strong grand-total cue ("TOTAL TTC ...")
+        # goes to grand_total even when it also mentions taxes ("toutes taxes
+        # comprises"); otherwise tax cues win, then subtotal, then bare total.
         money = _extract_money_after_cue(row)
         if money:
             val, region = money
-            if _has_cue(low, _TAX_CUES) and doc.tax.value is None:
+            strong_total = _has_cue(low, _GRAND_STRONG_CUES)
+            if (_has_cue(low, _TAX_CUES) and not strong_total
+                    and doc.tax.value is None):
                 doc.tax = _field_from_region(region, str(val), True)
-            elif _has_cue(low, _SUBTOTAL_CUES) and doc.subtotal.value is None:
+            elif (_has_cue(low, _SUBTOTAL_CUES) and not strong_total
+                    and doc.subtotal.value is None):
                 doc.subtotal = _field_from_region(region, str(val), True)
             elif _has_cue(low, _TOTAL_CUES) and doc.grand_total.value is None:
                 doc.grand_total = _field_from_region(region, str(val), True)
+
+    if doc.document_date.value is None and uncued_date is not None:
+        doc.document_date = _field_from_region(uncued_date[1], uncued_date[0], True)
 
     if currency_seen:
         doc.currency = FieldValue(value=currency_seen, corrected=False)
@@ -212,14 +238,23 @@ def _extract_line_items(rows: list[list[Region]]) -> list[LineItem]:
         if not money_vals:
             continue
 
-        # Description = leftmost regions before the first money token.
-        # A standalone small integer among those tokens is taken as quantity,
-        # regardless of whether it precedes or follows the description text
-        # (receipt layouts vary).
+        # Description = leftmost text before the first money token. When OCR
+        # merges description and price into one region ("Cafe Express 3,50"),
+        # the text before the money token inside that region is still used —
+        # the row must not be dropped. A standalone small integer is taken as
+        # quantity regardless of position (receipt layouts vary).
         desc_parts: list[str] = []
         qty: float | None = None
         for region in row:
-            if _MONEY_RE.search(region.text):
+            money_match = _MONEY_RE.search(region.text)
+            if money_match:
+                prefix = region.text[:money_match.start()].strip()
+                if prefix:
+                    qm = _QTY_RE.match(prefix)
+                    if qm and qty is None:
+                        qty = float(qm.group(1))
+                    else:
+                        desc_parts.append(prefix)
                 break
             qm = _QTY_RE.match(region.text)
             if qm and qty is None:
