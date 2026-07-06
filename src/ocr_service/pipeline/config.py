@@ -48,7 +48,6 @@ class Settings(BaseSettings):
     # --- Caching ------------------------------------------------------------
     cache_dir: str = Field(default="./.ocr_cache")
     cache_ttl_seconds: int = Field(default=60 * 60 * 24 * 7)  # 7 days; 0 = no expiry
-    output_dir: str = Field(default="./outputs")
 
     # --- Service ------------------------------------------------------------
     max_upload_mb: int = Field(default=25)

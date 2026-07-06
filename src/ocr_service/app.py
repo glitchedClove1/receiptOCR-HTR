@@ -16,7 +16,6 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from functools import partial
 
 from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -35,13 +34,20 @@ from .exceptions import (
     UnsupportedMediaError,
 )
 from .logging_config import configure_logging, get_logger, request_id_var
-from .metrics import FIELDS_EXTRACTED, PROCESSING_SECONDS, REGIONS_DETECTED, REQUESTS, metrics_app
+from .metrics import (
+    FIELDS_EXTRACTED,
+    PROCESSING_SECONDS,
+    REGIONS_DETECTED,
+    REQUESTS,
+    metrics_app,
+)
 from .pipeline.cache import content_hash, get_cache, image_hash, page_key
 from .pipeline.config import get_settings
 from .pipeline.excel_writer import write_workbook
 from .pipeline.model_loader import get_paddle
 from .pipeline.orchestrator import process_image_bytes, process_pdf_bytes
 from .pipeline.schemas import (
+    Document,
     PageResult,
     PdfProcessResponse,
     ProcessResponse,
@@ -132,15 +138,21 @@ async def _bad_pdf(_: Request, exc: InvalidPdfError):
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
+def _doc_type(request: Request) -> str:
+    return "pdf" if "pdf" in request.url.path else "image"
+
+
 @app.exception_handler(ModelLoadError)
-async def _model_load(_: Request, exc: ModelLoadError):
+async def _model_load(request: Request, exc: ModelLoadError):
     log.error("model load failed", fields={"error": str(exc)})
+    REQUESTS.labels(type=_doc_type(request), outcome="error").inc()
     return JSONResponse(status_code=503, content={"detail": "Model unavailable."})
 
 
 @app.exception_handler(PipelineError)
-async def _pipeline(_: Request, exc: PipelineError):
+async def _pipeline(request: Request, exc: PipelineError):
     log.error("pipeline error", fields={"error": str(exc)})
+    REQUESTS.labels(type=_doc_type(request), outcome="error").inc()
     return JSONResponse(status_code=500, content={"detail": "Processing failed."})
 
 
@@ -175,12 +187,19 @@ async def process(request: Request, file: UploadFile = File(...)) -> ProcessResp
         return ProcessResponse(cache_hit=True, image_hash=key,
                                excel_filename=excel_name, document=cached)
 
+    def _process_and_store() -> Document:
+        # Everything blocking — inference, workbook serialization, cache
+        # write — stays inside the executor thread so the event loop is
+        # never stalled.
+        d = process_image_bytes(data, settings)
+        write_workbook(d, cache.excel_path(key), settings)
+        cache.put(key, d)
+        return d
+
     loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
-    doc = await loop.run_in_executor(None, partial(process_image_bytes, data, settings))
+    doc = await loop.run_in_executor(None, _process_and_store)
     PROCESSING_SECONDS.labels(type="image").observe(time.perf_counter() - t0)
-    write_workbook(doc, cache.excel_path(key), settings)
-    cache.put(key, doc)
     REQUESTS.labels(type="image", outcome="success").inc()
     REGIONS_DETECTED.labels(type="image").observe(doc.region_count)
     FIELDS_EXTRACTED.labels(type="image").observe(len(doc.extra_fields))
@@ -194,7 +213,9 @@ async def process(request: Request, file: UploadFile = File(...)) -> ProcessResp
 @router.post("/process-pdf", response_model=PdfProcessResponse,
              dependencies=[Depends(require_api_key)])
 @limiter.limit("5/minute")
-async def process_pdf(request: Request, file: UploadFile = File(...)) -> PdfProcessResponse:
+async def process_pdf(
+    request: Request, file: UploadFile = File(...)
+) -> PdfProcessResponse:
     """Process a PDF: each page becomes its own document + workbook.
 
     The whole-PDF hash gates caching; a re-uploaded identical PDF returns the
@@ -212,25 +233,28 @@ async def process_pdf(request: Request, file: UploadFile = File(...)) -> PdfProc
         raise InvalidPdfError("File content does not match declared type.")
 
     pdf_hash = content_hash(data)
+    loop = asyncio.get_running_loop()
 
-    # --- Cache check: every page's result + workbook must be present --------
-    cached_pages: list[PageResult] = []
-    page_number = 1
-    all_cached = True
-    while True:
-        key = page_key(pdf_hash, page_number)
-        doc = cache.get(key)
-        if doc is None:
-            all_cached = False
-            break
-        if not cache.has_excel(key):
-            all_cached = False
-            break
-        cached_pages.append(PageResult(page_number=page_number,
-                                       excel_filename=f"{key}.xlsx", document=doc))
-        page_number += 1
+    # --- Cache check ---------------------------------------------------------
+    # The stored page count bounds the scan; without it a fully cached PDF is
+    # indistinguishable from a partial one (walking pages until a miss always
+    # ends on a miss). Runs in the executor: it does file I/O per page.
+    def _load_cached_pages() -> list[PageResult] | None:
+        count = cache.get_page_count(pdf_hash)
+        if not count:
+            return None
+        result: list[PageResult] = []
+        for page_number in range(1, count + 1):
+            key = page_key(pdf_hash, page_number)
+            doc = cache.get(key)
+            if doc is None or not cache.has_excel(key):
+                return None
+            result.append(PageResult(page_number=page_number,
+                                     excel_filename=f"{key}.xlsx", document=doc))
+        return result
 
-    if all_cached and cached_pages:
+    cached_pages = await loop.run_in_executor(None, _load_cached_pages)
+    if cached_pages:
         log.info("pdf cache hit", fields={"pdf_hash": pdf_hash,
                                           "pages": len(cached_pages)})
         REQUESTS.labels(type="pdf", outcome="cache_hit").inc()
@@ -238,26 +262,27 @@ async def process_pdf(request: Request, file: UploadFile = File(...)) -> PdfProc
                                   page_count=len(cached_pages), pages=cached_pages)
 
     # --- Full processing, page by page -------------------------------------
-    # Run the entire blocking pipeline (OCR + Ollama) in a thread so the
-    # event loop stays free for other requests during inference.
-    loop = asyncio.get_running_loop()
-    t0 = time.perf_counter()
-    pairs = await loop.run_in_executor(
-        None, lambda: list(process_pdf_bytes(data, settings))
-    )
-    total_seconds = time.perf_counter() - t0
-    pages: list[PageResult] = []
-    for num, doc in pairs:
-        key = page_key(pdf_hash, num)
-        write_workbook(doc, cache.excel_path(key), settings)
-        cache.put(key, doc)
-        pages.append(PageResult(page_number=num,
-                                excel_filename=f"{key}.xlsx", document=doc))
-        REGIONS_DETECTED.labels(type="pdf").observe(doc.region_count)
-        FIELDS_EXTRACTED.labels(type="pdf").observe(len(doc.extra_fields))
+    # The entire blocking pipeline — OCR, Ollama, workbook serialization and
+    # cache writes for up to pdf_max_pages pages — runs in a thread so the
+    # event loop (and /health) stays responsive throughout.
+    def _process_and_store() -> list[PageResult]:
+        result: list[PageResult] = []
+        for num, doc in process_pdf_bytes(data, settings):
+            key = page_key(pdf_hash, num)
+            write_workbook(doc, cache.excel_path(key), settings)
+            cache.put(key, doc)
+            result.append(PageResult(page_number=num,
+                                     excel_filename=f"{key}.xlsx", document=doc))
+            REGIONS_DETECTED.labels(type="pdf").observe(doc.region_count)
+            FIELDS_EXTRACTED.labels(type="pdf").observe(len(doc.extra_fields))
+        # Written last: its presence certifies that every page above exists.
+        cache.put_page_count(pdf_hash, len(result))
+        return result
 
+    t0 = time.perf_counter()
+    pages = await loop.run_in_executor(None, _process_and_store)
+    PROCESSING_SECONDS.labels(type="pdf").observe(time.perf_counter() - t0)
     REQUESTS.labels(type="pdf", outcome="success").inc()
-    PROCESSING_SECONDS.labels(type="pdf").observe(total_seconds)
     log.info("pdf processed", fields={"pdf_hash": pdf_hash, "pages": len(pages)})
     return PdfProcessResponse(cache_hit=False, pdf_hash=pdf_hash,
                               page_count=len(pages), pages=pages)

@@ -7,6 +7,8 @@ unit tests that don't touch real OCR don't pay the model-load cost.
 """
 from __future__ import annotations
 
+import threading
+
 import cv2
 import numpy as np
 
@@ -30,11 +32,16 @@ def _normalize_paddle_result(raw) -> list[Region]:
             return getattr(res, key, None)
 
     for res in raw:
-        texts = _get(res, "rec_texts") or []
-        scores = _get(res, "rec_scores") or []
+        # Explicit None checks: these values can be numpy arrays, whose
+        # truthiness (`x or []`) raises "ambiguous truth value".
+        texts = _get(res, "rec_texts")
+        texts = list(texts) if texts is not None else []
+        scores = _get(res, "rec_scores")
+        scores = list(scores) if scores is not None else []
         polys = _get(res, "rec_polys")
         if polys is None:
-            polys = _get(res, "dt_polys") or []
+            polys = _get(res, "dt_polys")
+        polys = list(polys) if polys is not None else []
 
         for text, conf, polygon in zip(texts, scores, polys, strict=False):
             text = (text or "").strip()
@@ -62,6 +69,12 @@ def _normalize_paddle_result(raw) -> list[Region]:
     return regions
 
 
+# Paddle inference predictors hold mutable internal state and are not
+# thread-safe. Requests run in a thread pool, so inference on the single
+# shared instance must be serialized.
+_predict_lock = threading.Lock()
+
+
 def run_ocr(image: np.ndarray, settings: Settings | None = None) -> list[Region]:
     """Run PaddleOCR on a (pre-processed) image and return Regions."""
     settings = settings or get_settings()
@@ -69,5 +82,6 @@ def run_ocr(image: np.ndarray, settings: Settings | None = None) -> list[Region]
     # PaddleOCR 3.x requires a 3-channel image; preprocessing always yields grayscale.
     if image.ndim == 2:
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    raw = list(ocr.predict(image))   # predict() is a generator in 3.x — materialize it
+    with _predict_lock:
+        raw = list(ocr.predict(image))   # predict() is a generator in 3.x
     return _normalize_paddle_result(raw)

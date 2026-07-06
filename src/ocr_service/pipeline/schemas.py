@@ -41,6 +41,10 @@ class Region(BaseModel):
     trocr_text: str | None = None
     # True when Paddle conf was low but region was Arabic so TrOCR was skipped.
     low_confidence_arabic: bool = False
+    # True when the HTR fallback was attempted for this low-confidence region
+    # but failed (crop error, model error, or empty output) — the unreliable
+    # Paddle text was kept and must be flagged for human review.
+    fallback_failed: bool = False
     corrected: bool = False
 
     @property

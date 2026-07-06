@@ -122,7 +122,13 @@ def _fallback_chain_from(primary: str, chain: list[str]) -> list[str]:
 
 
 def _flatten(obj: object, prefix: str = "") -> dict[str, str]:
-    """Recursively flatten a nested dict into a flat {label: value} mapping."""
+    """Recursively flatten a nested dict into a flat {label: value} mapping.
+
+    Handles dicts, scalars, and lists (despite the prompt requesting flat
+    JSON, smaller models still return arrays — those values must not be
+    silently dropped). Scalar list items are joined; dict items are flattened
+    with a numbered prefix.
+    """
     result: dict[str, str] = {}
     if not isinstance(obj, dict):
         return result
@@ -132,6 +138,14 @@ def _flatten(obj: object, prefix: str = "") -> dict[str, str]:
         label = f"{prefix} {k}".strip() if prefix else k.strip()
         if isinstance(v, dict):
             result.update(_flatten(v, label))
+        elif isinstance(v, list):
+            scalars = [str(i).strip() for i in v
+                       if isinstance(i, (str, int, float)) and str(i).strip()]
+            if scalars:
+                result[label] = "; ".join(scalars)
+            for idx, item in enumerate(v, start=1):
+                if isinstance(item, dict):
+                    result.update(_flatten(item, f"{label} {idx}"))
         elif isinstance(v, (str, int, float)):
             val = str(v).strip()
             if val:

@@ -1,11 +1,12 @@
 """Excel output (openpyxl) — one workbook per document.
 
 Produces two sheets:
-  * 'Fields'    — header key/value pairs + totals, with provenance columns
-                  and a review flag.
-  * 'LineItems' — the tabular line items.
-Low-confidence / Arabic-flagged values are highlighted so a human reviewer can
-find them quickly.
+  * 'Fields'    — every field dynamically extracted from the document by the
+                  LLM/VLM pass (the sheet is driven solely by extracted
+                  content — there are no fixed rows).
+  * 'LineItems' — the tabular line items from the rule-based pass.
+Values flagged needs_review are highlighted so a human reviewer can find
+them quickly.
 """
 from __future__ import annotations
 
@@ -87,7 +88,11 @@ def write_workbook(
     _autosize(ws2, li_headers)
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    wb.save(path)
+    # Atomic write: never leave a truncated workbook at the final path where
+    # a concurrent /download or a crash could expose it.
+    tmp = f"{path}.tmp"
+    wb.save(tmp)
+    os.replace(tmp, path)
     return path
 
 

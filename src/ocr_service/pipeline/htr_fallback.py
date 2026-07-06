@@ -101,16 +101,23 @@ def apply_fallback(
 
         crop = _crop_region(image, region)
         if crop is None:
+            region.fallback_failed = True
             continue
         try:
             trocr_text = recognizer(crop)
         except Exception:
-            # Graceful degradation: a single failed region must not abort.
+            # Graceful degradation: a single failed region must not abort —
+            # but the kept low-confidence text must be flagged for review.
+            region.fallback_failed = True
             continue
 
         region.trocr_text = trocr_text
         if trocr_text:
             region.text = trocr_text
             region.source = RecognizerSource.TROCR
+        else:
+            # Fallback produced nothing usable; the Paddle text stays but is
+            # below threshold and unverified.
+            region.fallback_failed = True
 
     return regions

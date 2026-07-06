@@ -36,6 +36,8 @@ class CacheBackend(Protocol):
     def put(self, key: str, doc: Document) -> None: ...
     def excel_path(self, key: str) -> str: ...
     def has_excel(self, key: str) -> bool: ...
+    def get_page_count(self, pdf_hash: str) -> int | None: ...
+    def put_page_count(self, pdf_hash: str, count: int) -> None: ...
 
 
 class DiskCache:
@@ -75,8 +77,37 @@ class DiskCache:
             return None
 
     def put(self, key: str, doc: Document) -> None:
-        with open(self._json_path(key), "w", encoding="utf-8") as fh:
+        # Atomic write: a crash mid-dump must not leave a truncated JSON that
+        # later parses as a corrupt cache entry.
+        final = self._json_path(key)
+        tmp = f"{final}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(doc.model_dump(mode="json"), fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, final)
+
+    # --- PDF page-count marker ----------------------------------------------
+    # Without a stored page count, a full-cache check cannot know where a
+    # PDF's pages end (walking until a miss always ends on a miss).
+    def _pages_path(self, pdf_hash: str) -> str:
+        return os.path.join(self.dir, f"{pdf_hash}_pages.json")
+
+    def get_page_count(self, pdf_hash: str) -> int | None:
+        pp = self._pages_path(pdf_hash)
+        if not os.path.exists(pp) or self._expired(pp):
+            return None
+        try:
+            with open(pp, encoding="utf-8") as fh:
+                count = json.load(fh).get("page_count")
+            return int(count) if count else None
+        except Exception:
+            return None
+
+    def put_page_count(self, pdf_hash: str, count: int) -> None:
+        pp = self._pages_path(pdf_hash)
+        tmp = f"{pp}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"page_count": count}, fh)
+        os.replace(tmp, pp)
 
 
 def get_cache(settings: Settings | None = None) -> CacheBackend:
