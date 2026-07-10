@@ -33,7 +33,11 @@ VOLUME ["/srv/.ocr_cache"]
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=20s --timeout=5s --start-period=30s --retries=3 \
+# start-period covers first-boot PaddleOCR weight downloads (UVDoc,
+# PP-OCRv6 det/rec, textline orientation) from an empty paddle_cache volume,
+# which took ~60s in testing — 30s was too tight and caused a transient
+# "unhealthy" flap before the app finished starting.
+HEALTHCHECK --interval=20s --timeout=5s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # One worker = one shared in-process model cache (PaddleOCR, TrOCR).

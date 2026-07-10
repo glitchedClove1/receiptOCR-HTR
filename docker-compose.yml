@@ -37,14 +37,25 @@ services:
         condition: service_healthy
     # Pull VLM (primary) then text fallback. -f makes an HTTP error fail the
     # init container (otherwise the stack would boot with no models and
-    # silently return empty fields). --max-time 7200 accommodates cold ~2GB
+    # silently return empty fields). --max-time 7200 accommodates cold ~2-3GB
     # pulls on slow links; already-present models return immediately.
     entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "curl -sf -X POST http://ollama:11434/api/pull
-        -d '{\"name\":\"qwen2.5vl:3b\",\"stream\":false}' --max-time 7200 &&
-       curl -sf -X POST http://ollama:11434/api/pull
-        -d '{\"name\":\"qwen2.5:3b\",\"stream\":false}' --max-time 7200"
+    # A single-element YAML list, not a plain scalar: Compose passes this one
+    # string through verbatim as argv[2] instead of re-tokenizing it, so a
+    # leading quote character can't get glued onto "curl" and break the
+    # command lookup (previously caused a spurious "exit 127").
+    #
+    # stream defaults to true (omitted below) so Ollama sends continuous
+    # NDJSON progress lines instead of holding the connection silent for the
+    # whole multi-GB download — the silent connection was getting dropped by
+    # the Docker Desktop network path partway through, failing with curl
+    # exit 52 ("empty reply from server").
+    command:
+      - >-
+        curl -sf -X POST http://ollama:11434/api/pull
+        -d '{"name":"qwen2.5vl:3b"}' --max-time 7200 &&
+        curl -sf -X POST http://ollama:11434/api/pull
+        -d '{"name":"qwen2.5:3b"}' --max-time 7200
     restart: "no"
 
   # ── OCR service ─────────────────────────────────────────────────────────────
