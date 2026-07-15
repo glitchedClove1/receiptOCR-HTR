@@ -3,8 +3,19 @@ services:
   # ── Ollama inference server ─────────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
+    # No host port publish: Ollama's API is unauthenticated and the ocr
+    # service reaches it over the internal compose network (http://ollama:11434).
+    # Publishing 11434 on a server would expose unauthenticated model/compute
+    # access to anyone who can reach the host. For local debugging only, add:
+    #   ports: ["127.0.0.1:11434:11434"]
+    environment:
+      # This host has ~7.4GB total RAM and only 4GB VRAM. Keep at most one
+      # model resident and release it quickly when idle instead of holding
+      # both the VLM and the text fallback in memory simultaneously — this
+      # host OOM-killed the ocr container twice under normal single-request
+      # load with the defaults.
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: "3m"
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -15,8 +26,10 @@ services:
       timeout: 5s
       retries: 6
       start_period: 15s
-    # GPU support — uncomment the block below if you have an NVIDIA GPU and
-    # nvidia-container-toolkit installed on the host.
+    # GPU support — UNCOMMENT ONLY on a host with an NVIDIA GPU and
+    # nvidia-container-toolkit installed. With this block active on a
+    # CPU-only host, `docker compose up` fails with "could not select
+    # device driver". The target VM has no GPU, so it stays commented.
     # deploy:
     #   resources:
     #     reservations:
@@ -78,8 +91,11 @@ services:
       OCR_PADDLE_PRIMARY_LANG: "fr"
       OCR_USE_GPU: "false"
       OCR_LOG_LEVEL: "INFO"
-      # Set a non-empty key to require X-API-Key on /v1 routes.
-      OCR_API_KEY: ""
+      # Required: /v1 routes demand this X-API-Key. Value comes from a .env
+      # file next to this compose file (gitignored — never committed). The
+      # :? guard makes `docker compose up` fail loudly if it's unset rather
+      # than silently booting with auth disabled. See .env.example.
+      OCR_API_KEY: "${OCR_API_KEY:?set OCR_API_KEY in .env (see .env.example)}"
     volumes:
       # Result cache — identical documents return instantly on re-upload,
       # and generated workbooks live here (served via /v1/download).

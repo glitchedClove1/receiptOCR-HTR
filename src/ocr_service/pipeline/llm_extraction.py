@@ -163,7 +163,7 @@ def _rows_to_text(rows: list[list[Region]]) -> str:
     return "\n".join(lines)
 
 
-_VLM_MAX_SIDE = 1024
+_VLM_MAX_SIDE = 768
 
 
 def _encode_image(image: np.ndarray) -> str:
@@ -227,9 +227,11 @@ def _try_vlm_model(
         "images": [image_b64],
         "format": "json",
         "stream": False,
-        # Images consume many tokens; 8192 comfortably fits a full invoice
-        # image + prompt without hitting the default 4096 token context limit.
-        "options": {"temperature": 0.0, "num_ctx": 8192},
+        # 4096 keeps the KV cache small enough to load reliably on a 4GB GPU.
+        # A larger context (8192) was observed to make the model hang and
+        # segfault under Docker Desktop's GPU passthrough on real, denser
+        # documents — see project notes on the VLM hang/VRAM-leak cascade.
+        "options": {"temperature": 0.0, "num_ctx": 4096},
     }
     try:
         resp = requests.post(
