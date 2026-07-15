@@ -8,6 +8,7 @@ image and the heavy deps are present.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 
 import numpy as np
@@ -158,7 +159,8 @@ def test_write_workbook(tmp_path):
 
 # ----------------------- end-to-end (optional) -----------------------------
 @pytest.mark.skipif(
-    not os.path.exists("samples/sample_receipt.jpg"),
+    not os.path.exists("samples/sample_receipt.jpg")
+    or importlib.util.find_spec("paddleocr") is None,
     reason="No sample image / heavy OCR deps not installed.",
 )
 def test_end_to_end_real_models():
